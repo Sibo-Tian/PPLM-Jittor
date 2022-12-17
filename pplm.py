@@ -34,8 +34,103 @@ from torchtext.vocab import Vectors, GloVe, CharNGram, FastText
 import transformers
 import random
 
+class ClassificationHead(jt.nn.Module):
+    """ Language Model Head for the transformer """
+
+    def __init__(self, class_size=5, embed_size=2048):
+        super(ClassificationHead, self).__init__()
+        self.class_size = class_size
+        self.embed_size = embed_size
+        # self.mlp1 = torch.nn.Linear(embed_size, embed_size)
+        # self.mlp2 = (torch.nn.Linear(embed_size, class_size))
+        self.mlp = (jt.nn.Linear(embed_size, class_size))
+
+    def execute(self, hidden_state):
+        # Truncated Language modeling logits (we remove the last token)
+        # h_trunc = h[:, :-1].contiguous().view(-1, self.n_embd)
+        # lm_logits = F.relu(self.mlp1(hidden_state))
+        # lm_logits = self.mlp2(lm_logits)
+        lm_logits = self.mlp(hidden_state)
+        return lm_logits
 
 enc = transformers.GPT2Tokenizer.from_pretrained('') # default path
+
+def latent_perturb(model, args, context=None, sample=True, device='cuda'):
+    if args.discrim == 'clickbait':
+        classifier = ClassificationHead(class_size=2, embed_size=1024)
+        classifier.load_state_dict(jt.load("discrim_models/clickbait_classifierhead.pt"))
+        classifier.eval()
+        args.label_class = 1 # clickbaity
+
+    elif args.discrim == 'sentiment':
+        classifier = ClassificationHead(class_size=5, embed_size=1024)
+        classifier.load_state_dict(jt.load("discrim_models/sentiment_classifierhead.pt"))
+        classifier.eval()
+        if args.label_class < 0:
+            raise Exception('Wrong class for sentiment, use --label-class 2 for *very positive*, 3 for *very negative*')
+        #args.label_class = 2 # very pos
+        #args.label_class = 3 # very neg
+
+    elif args.discrim == 'toxicity':
+        classifier = ClassificationHead(class_size=2, embed_size=1024).to(device)
+        classifier.load_state_dict(jt.load("discrim_models/toxicity_classifierhead.pt"))
+        classifier.eval()
+        args.label_class = 0 # not toxic
+    else:
+        classifier = None
+
+    # Get tokens for the list of positive words
+    def list_tokens(word_list):
+        token_list = []
+        for word in word_list:
+            token_list.append(enc.encode(" " + word))
+        return token_list
+
+
+    good_index = []
+    if args.bag_of_words:
+        bags_of_words = args.bag_of_words.split(";")
+        for wordlist in bags_of_words:
+            with open(wordlist, "r") as f:
+                words = f.read()
+                words = words.split('\n')
+            good_index.append(list_tokens(words))
+  
+    if args.bag_of_words and classifier:
+        print('Both PPLM-BoW and PPLM-Discrim are on. This is not optimized.')
+        args.loss_type = 3
+
+    elif args.bag_of_words:
+        args.loss_type = 1
+        print('Using PPLM-BoW')
+
+    elif classifier is not None:
+        args.loss_type = 2
+        print('Using PPLM-Discrim')
+
+    else:
+        raise Exception('Supply either --bag-of-words (-B) or --discrim -D')
+
+
+    original, _, _ = sample_from_hidden(model=model, args=args, context=context, device=device,
+                                  perturb=False, good_index=good_index, classifier=classifier)
+
+    perturbed_list = []
+    discrim_loss_list = []
+    loss_in_time_list = []
+
+    for i in range(args.num_samples):
+        perturbed, discrim_loss, loss_in_time = sample_from_hidden(model=model, args=args, context=context,
+                                                         device=device, perturb=True, good_index=good_index,
+                                                         classifier=classifier)
+        perturbed_list.append(perturbed)
+        if classifier is not None:
+            discrim_loss_list.append(discrim_loss.data.cpu().numpy())
+        loss_in_time_list.append(loss_in_time)
+
+
+    return original, perturbed_list, discrim_loss_list, loss_in_time_list
+
 def sample_from_hidden(model, args, classifier, context=None, past=None,
                        sample=True, perturb=True, good_index=None):
     
