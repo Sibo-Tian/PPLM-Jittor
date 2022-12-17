@@ -114,7 +114,7 @@ class myDiscriminator2mean(jt.nn.Module):
         mask_src = mask_src.repeat(1, self.embed_size, 1) #batch_size, 1024, length (repeat each sentence for 1024 times)
 
         x = x.tolist()
-        x = torch.tensor(x,dtype=torch.long)
+        x = jt.array(x,dtype=torch.long)
         output_dict = model(x, output_hidden_states=True)
         hidden = output_dict.hidden_states[-1]
         # x = model.forward_embed(x)
