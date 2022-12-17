@@ -1,5 +1,6 @@
 import jittor as jt
-from torch.autograd import Variable
+from jittor import Function
+# from torch.autograd import Variable
 
 def to_var(x, requires_grad=False, volatile=False):
     pass
@@ -18,3 +19,13 @@ def top_k_logits(logits, k, probs=False):
         if probs:
             return jt.where(logits < batch_mins, jt.ones_like(logits) * 0.0, logits)
         return jt.where(logits < batch_mins, jt.ones_like(logits) * -1e10, logits)
+
+class multinomial(Function):
+    def execute(self, input, num_samples, replacement=False):
+        return jt.code(shape=input.shape, dtype='int64', inputs=[input, num_samples, replacement], 
+            cpu_src='''
+                for (int i=0; i<)
+            '''
+        )
+
+        

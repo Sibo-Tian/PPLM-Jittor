@@ -29,13 +29,12 @@ from jittor.dataset import Dataset as jtDataset
 
 from torchtext import data as torchtext_data
 from torchtext import datasets
-
+from modeling_jittor_gpt2 import GPT2PreTrainedModel, GPT2Model
 from torchtext.vocab import Vectors, GloVe, CharNGram, FastText
 import transformers
 import random
 
-# try to use cuda
-jt.flags.use_cuda = 1
+
 enc = transformers.GPT2Tokenizer.from_pretrained('') # default path
 def sample_from_hidden(model, args, classifier, context=None, past=None,
                        sample=True, perturb=True, good_index=None):
@@ -127,6 +126,7 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
             # likelywords = jt.topk(log_probs, k=args.top_k, dim=-1)
             # print(enc.decode(likelywords[1].tolist()[0]))
             # print(likelywords[0].tolist())
+            # np.random.choice()
             prev = jt.multinomial(log_probs, num_samples=1)
         else:
             _, prev = jt.topk(log_probs, k=1, dim=-1)
@@ -139,8 +139,113 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
 
 
 def run_model():
-    pass
+    parser = argparse.ArgumentParser()
+    # 预训练模型
+    parser.add_argument('--model_path', '-M', type=str, default='gpt-2_pt_models/',
+                        help='预训练模型')
+    # Bags of words used for PPLM-BoW. Multiple BoWs separated by ;
+    parser.add_argument('--bag-of-words', '-B', type=str, default=None, 
+                        help='')
+    # Discriminator to use for loss-type 2
+    parser.add_argument('--discrim', '-D', type=str, default=None, 
+                        choices=('clickbait', 'sentiment', 'toxicity'), 
+                        help='')
+    parser.add_argument('--label-class', type=int, default=-1, help='Class label used for the discriminator')
+    parser.add_argument('--stepsize', type=float, default=0.02)
+    parser.add_argument("--length", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    # top-k采样
+    parser.add_argument("--top_k", type=int, default=10)
+    # 
+    parser.add_argument("--fusion-gm-scale", type=float, default=0.9)
+    parser.add_argument("--fusion-kl-scale", type=float, default=0.01)
+    parser.add_argument('--nocuda', action='store_true', help='no cuda')
+    # Generate from end-of-text as prefix
+    parser.add_argument('--uncond', action='store_true', help='前缀为end-of-text')
+    parser.add_argument("--cond-text", type=str, default='The lake', help='Prefix texts to condition on')
+    parser.add_argument('--num-iterations', type=int, default=3)
+    parser.add_argument('--grad-length', type=int, default=10000)
+    parser.add_argument('--num-samples', type=int, default=1,
+                        help='Number of samples to generate from the modified latents')
+    parser.add_argument('--horizon-length', type=int, default=1, help='Length of future to optimize over')
+    # parser.add_argument('--force-token', action='store_true', help='no cuda')
+    parser.add_argument('--window-length', type=int, default=0,
+                        help='Length of past which is being optimizer; 0 corresponds to infinite window length')
+    parser.add_argument('--decay', action='store_true', help='whether to decay or not')
+    parser.add_argument('--gamma', type=float, default=1.5)
+
+    args = parser.parse_args()
+
+    # 设置随机种子
+    np.random.seed(args.seed)
+    jt.core.set_seed(args.seed)
+
+    # use cuda
+    if not args.nocuda: 
+        jt.flags.use_cuda = 1
+
+    # load_pretrained
+    model = GPT2Model()
+    model.load(args.model_path)
+
+    # eval
+    model.eval()
+
+    # 固定参数
+    # TO DO
+    for param in model.Partermer.item():
+        pass
+
+    if args.uncond:
+        seq = [[50256, 50256]]
+
+    else:
+        # 前缀词
+        raw_text = args.cond_text
+        while not raw_text:
+            print('Did you forget to add `--cond-text`? ')
+            raw_text = input("Model prompt >>> ")
+        seq = [[50256] + enc.encode(raw_text)]
+
+    collect_gen = dict()
+    current_index = 0 
+    for out in seq:
+
+        text = enc.decode(out)
+        print("=" * 40 + " Prefix of sentence " + "=" * 40)
+        print(text)
+        print("=" * 80)
+
+        out1, out_perturb, discrim_loss_list, loss_in_time_list = latent_perturb(model=model, args=args, context=out)
+
+        text_whole = enc.decode(out1.tolist()[0])
+
+        print("=" * 80)
+        print("=" * 40 + " Whole sentence (Original)" + "=" * 40)
+        print(text_whole)
+        print("=" * 80)
+
+        out_perturb_copy = out_perturb
+
+        generated = 0
+        # 干扰后的结果
+        for out_perturb in out_perturb_copy:
+            try:
+                print("=" * 40 + " Whole sentence (Perturbed)" + "=" * 40)
+                text_whole = enc.decode(out_perturb.tolist()[0])
+                print(text_whole)
+                print("=" * 80)
+            except:
+                pass
+            collect_gen[current_index] = [out, out_perturb, out1]
+            # Save the prefix, perturbed seq, original seq for each index
+
+            current_index = current_index + 1
+
+    return
 
 if __name__ == '__main__':
     run_model()
+
 
