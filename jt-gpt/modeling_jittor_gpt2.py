@@ -1,22 +1,44 @@
 import math
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple, Union, List, Set
+from typing import Optional, Tuple, Union, List, Set, OrderedDict
 
 import jittor as jt
 from jittor import nn
 
-from ...activations import ACT2FN #TODO this is implemented by PyTorch
-from ...modeling_outputs import (
+# from transformers.activations import ACT2FN #TODO this is implemented by PyTorch
+class ClassInstantier(OrderedDict):
+    def __getitem__(self, key):
+        content = super().__getitem__(key)
+        cls, kwargs = content if isinstance(content, tuple) else (content, {})
+        return cls(**kwargs)
+
+
+ACT2CLS = {
+    # "gelu": GELUActivation,
+    # "gelu_10": (ClippedGELUActivation, {"min": -10, "max": 10}),
+    # "gelu_fast": FastGELUActivation,
+    # "gelu_new": NewGELUActivation,
+    # "gelu_python": (GELUActivation, {"use_gelu_python": True}),
+    # "linear": LinearActivation,
+    # "mish": MishActivation,
+    # "quick_gelu": QuickGELUActivation,
+    "relu": nn.ReLU,
+    "relu6": nn.ReLU6,
+    "sigmoid": nn.Sigmoid,
+    # "silu": SiLUActivation,
+    # "swish": SiLUActivation,
+    "tanh": nn.Tanh,
+}
+ACT2FN = ClassInstantier(ACT2CLS)
+from transformers.modeling_outputs import (
     #BaseModelOutputWithPastAndCrossAttentions,
-    CausalLMOutputWithCrossAttentions,
-    SequenceClassifierOutputWithPast,
-    TokenClassifierOutput,
+    CausalLMOutputWithCrossAttentions
 )
 
-from ...modeling_jittor_utils import PreTrainedModel, SequenceSummary
+from modeling_jittor_utils import PreTrainedModel
 # from ...pytorch_utils import Conv1D, find_pruneable_heads_and_indices, prune_conv1d_layer
-from ...utils import (
+from transformers.utils import (
     ModelOutput,
     add_code_sample_docstrings,
     add_start_docstrings,
@@ -24,8 +46,8 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from ...utils.model_parallel_utils import assert_device_map, get_device_map
-from .configuration_gpt2 import GPT2Config
+from transformers.utils.model_parallel_utils import assert_device_map, get_device_map
+from transformers.models.gpt2.configuration_gpt2 import GPT2Config
 
 logger = logging.get_logger(__name__)
 
@@ -102,7 +124,7 @@ class GPT2Attention(jt.nn.Module):
     def __init__(self, config, is_cross_attention=False, layer_idx=None) -> None:
         super().__init__()
 
-        max_positions = config.max_position_embedding
+        max_positions = config.n_positions
         self._bias = jt.tril(jt.ones((max_positions, max_positions), dtype=jt.uint8)).reshape(
             (1,1,max_positions,max_positions)
             ) #lower trangle matrix
@@ -168,7 +190,9 @@ class GPT2Attention(jt.nn.Module):
         if not self.is_cross_attention:
             # if only "normal" attention layer implements causal mask
             query_length, key_length = query.size(-2), key.size(-2)
+            batch_size, num_heads = query.size(0), query.size(1)
             causal_mask = self._bias[:, :, key_length - query_length : key_length, :key_length].bool()
+            causal_mask = causal_mask.repeat(batch_size, num_heads, 1 , 1)
             mask_value = 1e-32#torch.finfo(attn_weights.dtype).min
             # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
             # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
@@ -264,7 +288,7 @@ class GPT2Attention(jt.nn.Module):
 
     def execute(
         self,
-        hidden_states: Optional[Tuple[jt.array]],
+        hidden_states: Optional[Tuple[jt.array]], #[batch_size, seq_len, embedding_size]
         layer_past: Optional[Tuple[jt.array]] = None,
         attention_mask: Optional[jt.array] = None,
         head_mask: Optional[jt.array] = None,
@@ -281,6 +305,7 @@ class GPT2Attention(jt.nn.Module):
                 )
 
             query = self.q_attn(hidden_states)
+            print(self.c_attn(encoder_hidden_states).shape)
             key, value = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
             attention_mask = encoder_attention_mask
         else:
@@ -316,6 +341,7 @@ class GPT2Attention(jt.nn.Module):
         return outputs  # a, present, (attentions)
 
 
+
 class GPT2MLP(nn.Module):
     def __init__(self, intermediate_size, config):
         super().__init__()
@@ -325,7 +351,7 @@ class GPT2MLP(nn.Module):
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
 
-    def forward(self, hidden_states: Optional[Tuple[jt.array]]) -> jt.array:
+    def execute(self, hidden_states: Optional[Tuple[jt.array]]) -> jt.array:
         hidden_states = self.c_fc(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states = self.c_proj(hidden_states)
@@ -795,42 +821,42 @@ class GPT2Model(GPT2PreTrainedModel):
             #         head_mask = head_mask.to(hidden_states.device)
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
+            #TODO find similar methods like torch.utils.checkpoint.checkpoint in Jittor
+            # if self.gradient_checkpointing and self.training:
 
-            if self.gradient_checkpointing and self.training:
+            #     if use_cache:
+            #         logger.warning(
+            #             "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+            #         )
+            #         use_cache = False
 
-                if use_cache:
-                    logger.warning(
-                        "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                    )
-                    use_cache = False
+            #     def create_custom_forward(module):
+            #         def custom_forward(*inputs):
+            #             # None for past_key_value
+            #             return module(*inputs, use_cache, output_attentions)
 
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        # None for past_key_value
-                        return module(*inputs, use_cache, output_attentions)
+            #         return custom_forward
 
-                    return custom_forward
-
-                outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    None,
-                    attention_mask,
-                    head_mask[i],
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                )
-            else:
-                outputs = block(
-                    hidden_states,
-                    layer_past=layer_past,
-                    attention_mask=attention_mask,
-                    head_mask=head_mask[i],
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                )
+            #     outputs = torch.utils.checkpoint.checkpoint(
+            #         create_custom_forward(block),
+            #         hidden_states,
+            #         None,
+            #         attention_mask,
+            #         head_mask[i],
+            #         encoder_hidden_states,
+            #         encoder_attention_mask,
+            #     )
+            #else:
+            outputs = block(
+                hidden_states,
+                layer_past=layer_past,
+                attention_mask=attention_mask,
+                head_mask=head_mask[i],
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=encoder_attention_mask,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+            )
 
             hidden_states = outputs[0]
             if use_cache is True:
@@ -867,4 +893,166 @@ class GPT2Model(GPT2PreTrainedModel):
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
             cross_attentions=all_cross_attentions,
+        )
+
+class GPT2LMHeadModel(GPT2PreTrainedModel):
+    _keys_to_ignore_on_load_missing = [r"attn.masked_bias", r"attn.bias", r"lm_head.weight"]
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.transformer = GPT2Model(config)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    @add_start_docstrings(PARALLELIZE_DOCSTRING)
+    def parallelize(self, device_map=None):
+        # self.device_map = (
+        #     get_device_map(len(self.transformer.h), range(torch.cuda.device_count()))
+        #     if device_map is None
+        #     else device_map
+        # )
+        # assert_device_map(self.device_map, len(self.transformer.h))
+        # self.transformer.parallelize(self.device_map)
+        # self.lm_head = self.lm_head.to(self.transformer.first_device)
+        # self.model_parallel = True
+        pass
+
+    @add_start_docstrings(DEPARALLELIZE_DOCSTRING)
+    def deparallelize(self):
+        # self.transformer.deparallelize()
+        # self.transformer = self.transformer.to("cpu")
+        # self.lm_head = self.lm_head.to("cpu")
+        # self.model_parallel = False
+        # torch.cuda.empty_cache()
+        pass
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def prepare_inputs_for_generation(self, input_ids, past=None, **kwargs):
+        token_type_ids = kwargs.get("token_type_ids", None)
+        # only last token for inputs_ids if past is defined in kwargs
+        if past:
+            input_ids = input_ids[:, -1].unsqueeze(-1)
+            if token_type_ids is not None:
+                token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
+
+        attention_mask = kwargs.get("attention_mask", None)
+        position_ids = kwargs.get("position_ids", None)
+
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past:
+                position_ids = position_ids[:, -1].unsqueeze(-1)
+        else:
+            position_ids = None
+        return {
+            "input_ids": input_ids,
+            "past_key_values": past,
+            "use_cache": kwargs.get("use_cache"),
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        }
+
+    @add_start_docstrings_to_model_forward(GPT2_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        processor_class=_TOKENIZER_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=CausalLMOutputWithCrossAttentions,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def execute(
+        self,
+        input_ids: Optional[jt.array] = None,
+        past_key_values: Optional[Tuple[Tuple[jt.array]]] = None,
+        attention_mask: Optional[tjt.array] = None,
+        token_type_ids: Optional[jt.array] = None,
+        position_ids: Optional[jt.array] = None,
+        head_mask: Optional[jt.array] = None,
+        inputs_embeds: Optional[jt.array] = None,
+        encoder_hidden_states: Optional[jt.array] = None,
+        encoder_attention_mask: Optional[jt.array] = None,
+        labels: Optional[jt.array] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
+            `labels = input_ids` Indices are selected in `[-100, 0, ..., config.vocab_size]` All labels set to `-100`
+            are ignored (masked), the loss is only computed for labels in `[0, ..., config.vocab_size]`
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        transformer_outputs = self.transformer(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        hidden_states = transformer_outputs[0]
+
+        # Set device for model parallelism
+        if self.model_parallel:
+            pass
+            # torch.cuda.set_device(self.transformer.first_device)
+            # hidden_states = hidden_states.to(self.lm_head.weight.device)
+
+        lm_logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = jt.nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+        if not return_dict:
+            output = (lm_logits,) + transformer_outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            attentions=transformer_outputs.attentions,
+            cross_attentions=transformer_outputs.cross_attentions,
+        )
+
+    @staticmethod
+    def _reorder_cache(past: Tuple[Tuple[jt.array]], beam_idx: jt.array) -> Tuple[Tuple[jt.array]]:
+        """
+        This function is used to re-order the `past_key_values` cache if [`~PreTrainedModel.beam_search`] or
+        [`~PreTrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
+        beam_idx at every generation step.
+        """
+        return tuple(
+            tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)
+            for layer_past in past
         )
