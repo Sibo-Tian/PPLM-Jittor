@@ -54,9 +54,7 @@ class Discriminator2mean(jt.nn.Module):
             self.classifierhead = ClassificationHead(class_size=class_size, embed_size=embed_size)
         else:
             self.classifierhead = head
-        config = gpt2.GPT2Config()
-        self.model = gpt2.GPT2LMHeadModel(config)
-        self.model.load('gpt2.pkl')
+        self.model = transformers.GPT2LMHeadModel.from_pretrained('gpt2-medium')
         self.embed_size = embed_size
     
     def get_classifier(self):
@@ -68,15 +66,18 @@ class Discriminator2mean(jt.nn.Module):
     def execute(self, x):
         mask_src = 1 - x.equal(0).unsqueeze(1).detach()
         mask_src = mask_src.repeat(1, self.embed_size, 1) #batch_size, 1024, length (repeat each sentence for 1024 times)
-
-        output_dict = self.model(x)
+        mask_src = torch.tensor(mask_src.tolist())
+        x = torch.tensor(x.tolist(),dtype=torch.long)
+        output_dict = self.model(x, output_hidden_states=True)
         hidden = output_dict.hidden_states[-1]
 
         hidden = hidden.permute(0, 2, 1)
         hidden = hidden * mask_src  # / torch.sum(mask_src, dim=-1).unsqueeze(2).repeat(1, 1, batch_length)
         #
         hidden = hidden.permute(0, 2, 1)
-        x =  jt.sum(hidden, dim=1)/(jt.sum(mask_src, dim=-1) + 1e-10)
+        x =  torch.sum(hidden, dim=1)/(torch.sum(mask_src, dim=-1) + 1e-10)
+        
+        x = jt.array(x.tolist(), dtype=jt.int64)
         x = self.classifierhead(x)
         x = jt.nn.log_softmax(x, dim=-1)
         return x
@@ -133,7 +134,7 @@ def train_epoch(data_loader, discriminator:Discriminator2mean, args=None):
     optimizer = jt.optim.Adam(discriminator.get_classifier_param(), lr=0.0001)
     for epoch in range(args.epochs):
         for batch_idx, (data, target) in enumerate(data_loader):
-            print('Epoch: {}, batch: {}'.format(idx,batch_idx))
+            print('Epoch: {}, batch: {}'.format(epoch,batch_idx))
             start = time.time()
             data, target = data, target.reshape(-1) # data is 2-d list [batch_size, length(after padding)], target is 1-d list [batch_size]
             optimizer.zero_grad()
@@ -146,7 +147,7 @@ def train_epoch(data_loader, discriminator:Discriminator2mean, args=None):
                     epoch, batch_idx * len(data), len(data_loader),
                         batch_idx * len(data) / len(data_loader), loss.item()))
         head = discriminator.get_classifier()
-        head.save('jt'+args.dataset_label+'-'+str(epoch)+'.pkl')
+        head.save(args.dataset_label+'-'+str(epoch)+'.pkl')
 
 # %%
 def test_epoch(data_loader, discriminator, args=None):
@@ -166,6 +167,7 @@ def test_epoch(data_loader, discriminator, args=None):
 
 # %%
 model = Discriminator2mean()
-train_epoch(train_dataset, model, args)
-
-
+head = model.get_classifier()
+head.load_state_dict(torch.load('discrim_models/sentiment_classifierhead.pt').state_dict())
+# train_epoch(train_dataset, model, args)
+test_epoch(test_dataset, model, args)
