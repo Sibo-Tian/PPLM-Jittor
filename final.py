@@ -11,6 +11,7 @@ from jittor import nn
 import gpt2
 
 from style_utils import top_k_logits
+from scores import dist_n
 
 # %%
 class myClassificationHead(jt.nn.Module):
@@ -77,26 +78,6 @@ l = jt.nn.Linear(config.n_embd, config.vocab_size, bias=False)
 l.load_state_dict(copy_model.lm_head.state_dict())
 model = gpt2.GPT2LMHeadModel(config, m, l)
 
-# %%
-# classifier = myClassificationHead(class_size=5, embed_size=1024)
-# classifier.load_state_dict(torch.load("discrim_models/sentiment_classifierhead.pt",map_location=torch.device('cpu')))
-# classifier.eval()
-# input_ids = jt.array([50256]+enc.encode('Hello guys')).astype(jt.int64).unsqueeze(dim=0)
-# prev = input_ids[:,-1:]
-
-# fuck=model(input_ids)
-# true_past = fuck.past_key_values
-# origin_prob = (fuck.logits)
-
-# fine = model(input_ids[:,:-1])
-# past = fine.past_key_values
-
-# args.loss_type=2
-# pertrubed,a,b,c = perturb_past(past=past, model=model, prev=prev, args=args, classifier=classifier, true_past=true_past, original_probs=origin_prob)
-
-# %%
-
-# %%
 def latent_perturb(model, args, context=None, sample=True):
     #==================================================prepare the discriminator/bag of words==============================================
     if args.discrim == 'clickbait':
@@ -271,9 +252,13 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
             # print(likelywords[0].tolist())
             # np.random.choice()
             #TODO
-            prev = jt.multinomial(log_probs, num_samples=1)
+            # prev = jt.multinomial(log_probs, num_samples=1)
+            prev = torch.multinomial(torch.tensor(log_probs.tolist()), num_samples=1)
+            prev = jt.array(prev.tolist())
         else:
-            _, prev = jt.topk(log_probs, k=1, dim=-1)
+            # _, prev = jt.topk(log_probs, k=1, dim=-1)
+            prev = torch.multinomial(torch.tensor(log_probs.tolist()), num_samples=1)
+            prev = jt.array(prev.tolist())
 
         output = prev if output is None else jt.concat((output, prev), dim=1)  # update output
         print(enc.decode(output.tolist()[0]))
@@ -416,9 +401,9 @@ def perturb_past(past, model, prev, args, classifier, true_past, original_probs,
             perturb_grad.append([-stepsize * (grad[i][j] * window_mask / grad_norms[i][j] ** args.gamma) for j, _ in enumerate(layer)])
         
         past_perturb_orig = list(map(key_values_add, perturb_grad, past_perturb_orig))
-        jt.sync_all()
-        jt.display_memory_info()
-        jt.gc()
+        # jt.sync_all()
+        # jt.display_memory_info()
+        # jt.gc()
 
     
     perturbed_past = list(map(key_values_add, past, past_perturb_orig))
@@ -433,9 +418,9 @@ parser.add_argument('--bag-of-words', '-B', type=str, default=None,
 parser.add_argument('--discrim', '-D', type=str, default='sentiment', 
                     choices=('clickbait', 'sentiment', 'toxicity'), 
                     help='')
-parser.add_argument('--label-class', type=int, default=2, help='Class label used for the discriminator')
-parser.add_argument('--stepsize', type=float, default=20000) #0.02 multinomial
-parser.add_argument("--length", type=int, default=10)
+parser.add_argument('--label-class', type=int, default=2, help='Class label used for the discriminator')#2-positive; 3-negative
+parser.add_argument('--stepsize', type=float, default=20) #0.02 multinomial
+parser.add_argument("--length", type=int, default=2)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--temperature", type=float, default=1.0)
 # top-k采样
@@ -468,17 +453,18 @@ if not args.nocuda:
     jt.flags.use_cuda = 0
 
 # load_pretrained
-if args.uncond:
-    seq = [[50256, 50256]]
+# if args.uncond:
+#     seq = [[50256, 50256]]
 
-else:
-    # 前缀词
-    raw_text = args.cond_text
-    while not raw_text:
-        print('Did you forget to add `--cond-text`? ')
-        raw_text = input("Model prompt >>> ")
-    seq = [[50256] + enc.encode(raw_text)]
-
+# else:
+#     # 前缀词
+#     raw_text = args.cond_text
+#     while not raw_text:
+#         print('Did you forget to add `--cond-text`? ')
+#         raw_text = input("Model prompt >>> ")
+#     seq = [[50256] + enc.encode(raw_text)]
+prefix = ['The country']#, 'The chicken', 'The house', 'The food']
+seq = [[50256] + enc.encode(p) for p in prefix]
 # %%
 collect_gen = dict()
 current_index = 0 
@@ -515,7 +501,25 @@ for out in seq:
 
         current_index = current_index + 1
 
-# %%
+origin = []
+perturb = []
+for idx in range(current_index):
+    sen = collect_gen[idx]
+    origin.append(enc.decode(sen[2].tolist()[0]))
+    perturb.append(enc.decode(sen[1].tolist()[0]))
 
 
+dist_score1 = dist_n(origin, 1)
+dist_score2 = dist_n(origin, 2)
+dist_score3 = dist_n(origin, 3)
 
+dist_score1p = dist_n(perturb, 1)
+dist_score2p = dist_n(perturb, 2)
+dist_score3p = dist_n(perturb, 3)
+
+input1 = torch.tensor(enc.encode(origin))
+input2 = torch.tensor(enc.encode(perturb))
+
+pp1 = copy_model(input1,labels=input1)
+pp2 = copy_model(input2, labels=input2)
+print(dist_score1, dist_score1p,pp1.loss,pp2.loss)
