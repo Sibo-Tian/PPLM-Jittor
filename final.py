@@ -11,7 +11,7 @@ from jittor import nn
 import gpt2
 
 from style_utils import top_k_logits
-from scores import dist_n
+#from scores import dist_n
 
 # %%
 class myClassificationHead(jt.nn.Module):
@@ -391,10 +391,11 @@ def perturb_past(past, model, prev, args, classifier, true_past, original_probs,
                           enumerate(past_perturb_orig)]
         else:
             grad_norms = []
-            for layer in enumerate(grad):
-                # grad_norms.append([(jt.norm(block * window_mask) + SmallConst) for block in layer])
+            for _ , layer in enumerate(grad):
+                grad_norms.append([jt.repeat((jt.norm(block * window_mask,keepdim=True) + SmallConst), (1,64) ) for block in layer])
                 #TODO
-                grad_norms.append([1 for block in layer])
+                
+                
 
         perturb_grad = []
         for i, layer in enumerate(past_perturb_orig):
@@ -418,21 +419,21 @@ parser.add_argument('--bag-of-words', '-B', type=str, default=None,
 parser.add_argument('--discrim', '-D', type=str, default='sentiment', 
                     choices=('clickbait', 'sentiment', 'toxicity'), 
                     help='')
-parser.add_argument('--label-class', type=int, default=2, help='Class label used for the discriminator')#2-positive; 3-negative
-parser.add_argument('--stepsize', type=float, default=20) #0.02 multinomial
-parser.add_argument("--length", type=int, default=2)
+parser.add_argument('--label-class', type=int, default=3, help='Class label used for the discriminator')#2-positive; 3-negative
+parser.add_argument('--stepsize', type=float, default=0.03) #0.02 multinomial
+parser.add_argument("--length", type=int, default=20)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--temperature", type=float, default=1.0)
 # top-k采样
 parser.add_argument("--top_k", type=int, default=10)
 # 
-parser.add_argument("--fusion-gm-scale", type=float, default=0.9)
+parser.add_argument("--fusion-gm-scale", type=float, default=0.95)
 parser.add_argument("--fusion-kl-scale", type=float, default=0.01)
 parser.add_argument('--nocuda', action='store_true', help='no cuda')
 # Generate from end-of-text as prefix
 parser.add_argument('--uncond', action='store_true', help='前缀为end-of-text')
 parser.add_argument("--cond-text", type=str, default='The house', help='Prefix texts to condition on')
-parser.add_argument('--num-iterations', type=int, default=3)
+parser.add_argument('--num-iterations', type=int, default=10)
 parser.add_argument('--grad-length', type=int, default=10000)
 parser.add_argument('--num-samples', type=int, default=1,
                     help='Number of samples to generate from the modified latents')
@@ -441,7 +442,7 @@ parser.add_argument('--horizon-length', type=int, default=1, help='Length of fut
 parser.add_argument('--window-length', type=int, default=0,
                     help='Length of past which is being optimizer; 0 corresponds to infinite window length')
 parser.add_argument('--decay', action='store_true', help='whether to decay or not')
-parser.add_argument('--gamma', type=float, default=1.5)
+parser.add_argument('--gamma', type=float, default=1.0)
 
 args = parser.parse_args(args=[])
 # 设置随机种子
@@ -501,6 +502,18 @@ for out in seq:
 
         current_index = current_index + 1
 
+def dist_n(sentences, n, encoded = True):
+    total = 0
+    for sen in sentences:
+        if not encoded:
+            sen = sen.split()
+        grams = []
+        for x in range(0, len(sen)-n+1):
+            grams.append(tuple(sen[x:(x+n)]))
+        total += len(set(grams)) / len(grams)
+    return total / len(sentences)
+
+
 origin = []
 perturb = []
 for idx in range(current_index):
@@ -517,9 +530,16 @@ dist_score1p = dist_n(perturb, 1)
 dist_score2p = dist_n(perturb, 2)
 dist_score3p = dist_n(perturb, 3)
 
-input1 = torch.tensor(enc.encode(origin))
-input2 = torch.tensor(enc.encode(perturb))
+origin = []
+perturb = []
+for idx in range(current_index):
+    sen = collect_gen[idx]
+    origin.append(sen[2].tolist()[0])
+    perturb.append(sen[1].tolist()[0])
 
-pp1 = copy_model(input1,labels=input1)
-pp2 = copy_model(input2, labels=input2)
-print(dist_score1, dist_score1p,pp1.loss,pp2.loss)
+input1 = torch.tensor(origin)
+input2 = torch.tensor(perturb)
+
+pp1 = torch.exp(copy_model(input1,labels=input1).loss)
+pp2 = torch.exp(copy_model(input2, labels=input2).loss)
+print(dist_score1p, dist_score2p,dist_score3p,pp2)
