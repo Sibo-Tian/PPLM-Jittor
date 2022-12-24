@@ -10,7 +10,7 @@ import jittor as jt
 from jittor import nn
 import gpt2
 
-from style_utils import top_k_logits
+from style_utils import top_k_logits, multinomial
 #from scores import dist_n
 
 # %%
@@ -252,7 +252,7 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
             # print(likelywords[0].tolist())
             # np.random.choice()
             #TODO
-            # prev = jt.multinomial(log_probs, num_samples=1)
+            # prev = multinomial(log_probs, num_samples=1)
             prev = torch.multinomial(torch.tensor(log_probs.tolist()), num_samples=1)
             prev = jt.array(prev.tolist())
         else:
@@ -266,6 +266,7 @@ def sample_from_hidden(model, args, classifier, context=None, past=None,
     return output, true_discrim_loss, loss_in_time
 
 # %%
+
 def perturb_past(past, model, prev, args, classifier, true_past, original_probs,stepsize=0.01, vocab_size=50257, 
                 good_index=None,accumulated_hidden=None,  grad_norms=None):
     #prev: 2d jt.array
