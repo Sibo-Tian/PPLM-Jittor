@@ -1,12 +1,10 @@
 # %%
 import argparse
-from tqdm import trange
 # from torchtext.vocab import Vectors, GloVe, CharNGram, FastText
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torch.utils.data.dataset import random_split
+from scipy.special import lambertw
+import numpy as np
 from torchtext import data as torchtext_data
 from torchtext import datasets
 
@@ -56,7 +54,8 @@ class Discriminator2mean(jt.nn.Module):
             self.classifierhead = head
         config = gpt2.GPT2Config()
         self.model = gpt2.GPT2LMHeadModel(config)
-        self.model.load('gpt2.pkl')
+        # 正式训练的时候取消注释
+        # self.model.load('gpt2.pkl')
         self.embed_size = embed_size
     
     def get_classifier(self):
@@ -133,13 +132,29 @@ def train_epoch(data_loader, discriminator:Discriminator2mean, args=None):
     optimizer = jt.optim.Adam(discriminator.get_classifier_param(), lr=0.0001)
     for epoch in range(args.epochs):
         for batch_idx, (data, target) in enumerate(data_loader):
-            print('Epoch: {}, batch: {}'.format(idx,batch_idx))
+            print('Epoch: {}, batch: {}'.format(epoch, batch_idx))
             start = time.time()
             data, target = data, target.reshape(-1) # data is 2-d list [batch_size, length(after padding)], target is 1-d list [batch_size]
             optimizer.zero_grad()
             output = discriminator(data)
             loss = jt.nn.nll_loss(output, target)
-            optimizer.step(loss)
+            # print(type(loss))
+            origin_loss = loss.detach().numpy()
+            tau = np.log(5)
+            lam = 1.0
+            fac = 0.0
+            if fac > 0.0:
+                tau = fac * origin_loss.mean() + (1.0 - fac) * tau
+
+            beta = (origin_loss - tau) / lam
+            gamma = -2.0 / np.exp(1.0)
+            sigma = np.exp(-lambertw(0.5 * np.maximum(beta, gamma))).real
+            sigma = jt.Var(np.array(sigma))
+            super_loss = (loss - tau) * sigma + lam * (jt.log(sigma) ** 2)
+
+
+            # optimizer.step(loss)
+            optimizer.step(super_loss)
             print('batch time cost: {}'.format(time.time() - start))
             if batch_idx % args.log_interval == 0:
                 print('Relu Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
